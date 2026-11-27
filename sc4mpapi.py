@@ -50,7 +50,8 @@ except ImportError:
 
 SC4MP_TITLE = "SC4MP API"
 
-SC4MP_SERVERS = [("servers.sc4mp.org", port) for port in range(7240, 7250)]
+SC4MP_SERVERS_DOMAIN = "servers.sc4mp.org"
+SC4MP_SERVERS = [(SC4MP_SERVERS_DOMAIN, port) for port in range(7240, 7250)]
 
 SC4MP_BUFFER_SIZE = BUFFER_SIZE
 
@@ -984,7 +985,11 @@ class Scanner(Thread):
 
 					entry["server_id"] = server_id	# for the region map URLs
 
-					self.parent.new_servers.setdefault(server_id, entry)
+					# The official servers are also listed by their IP address, so the copy fetched by the official hostname replaces that one (and its URL is served)
+					if entry["host"] == SC4MP_SERVERS_DOMAIN:
+						self.parent.new_servers[server_id] = entry
+					else:
+						self.parent.new_servers.setdefault(server_id, entry)
 
 					# Fetch server data using appropriate protocol
 					if use_legacy:
@@ -1000,9 +1005,10 @@ class Scanner(Thread):
 							with self.parent.download_lock:
 								entry["stats"] = self.server_stats(server_id)
 
-					# Served right away, instead of when the scan ends, and saved for after a restart
-					self.parent.servers[server_id] = entry
-					self.parent.save(server_id, entry)
+					# Served right away, instead of when the scan ends, and saved for after a restart (unless the copy fetched by the official hostname was found too)
+					if entry["host"] == SC4MP_SERVERS_DOMAIN or self.parent.new_servers.get(server_id, entry)["host"] != SC4MP_SERVERS_DOMAIN:
+						self.parent.servers[server_id] = entry
+						self.parent.save(server_id, entry)
 
 				except TimeoutError:
 
