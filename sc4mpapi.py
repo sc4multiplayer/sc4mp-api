@@ -64,6 +64,9 @@ SC4MP_CITIES_PATH = SC4MP_DATABASE_PATH / "cities"		# each savegame's region vie
 SC4MP_MAPS_PATH = SC4MP_DATABASE_PATH / "maps"			# assembled region maps
 SC4MP_MAP_WIDTH = 1600					# default width of a region map
 SC4MP_MAP_DOWNLOAD_LIMIT = 100_000_000	# bytes of new savegames downloaded per server per scan, so big servers fill in over a few scans
+SC4MP_REGION_FILE_LIMIT = 5_000_000	# bytes of each region's `region.json` and `config.bmp` (bigger ones aren't downloaded), and up to `SC4MP_MAP_DOWNLOAD_LIMIT` bytes of them per server per scan
+SC4MP_CONFIG_MAX_SIZE = 1024	# pixels, the widest and tallest a region's `config.bmp` is read
+SC4MP_IMAGE_MAX_SIZE = 2048	# pixels, the widest and tallest a savegame's region view image is read
 SC4MP_MAP_WIDTHS = (400, 800, 1600, 4096)	# widths a region map is rendered at (requested widths are rounded up to one of these)
 SC4MP_MAP_X = (90.5, 17.75)	# screen offset of one tile along a city's x axis in the region view
 SC4MP_MAP_Y = (-37.25, 45.0)	# screen offset of one tile along a city's y axis
@@ -197,7 +200,10 @@ def is_snow(r, g, b):
 def clean_city_image(data):
 	"""Makes the opaque black background some region view images have (SC4's empty city image) transparent. Returns the PNG, the share of the city covered in snow, its most common land and water colors, and whether it was the empty city image."""
 
-	image = Image.open(io.BytesIO(data)).convert("RGBA")
+	image = Image.open(io.BytesIO(data))
+	if max(image.size) > SC4MP_IMAGE_MAX_SIZE:
+		raise ValueError(f"The region view image is too large ({image.size[0]}x{image.size[1]}).")
+	image = image.convert("RGBA")
 	width, height = image.size
 	pixels = image.load()
 
@@ -328,6 +334,8 @@ def read_region_config(path):
 	"""Reads a region's `config.bmp`: each tile's position and size (reddish pixels are small tiles, greenish medium and bluish large, like SC4)."""
 
 	with Image.open(path) as image:
+		if max(image.size) > SC4MP_CONFIG_MAX_SIZE:
+			raise ValueError(f"The region's config.bmp is too large ({image.size[0]}x{image.size[1]}).")
 		image = image.convert("RGB")
 		width, height = image.size
 		pixels = image.load()
@@ -1150,6 +1158,7 @@ class Scanner(Thread):
 			ft = []
 			regions = {}
 			new_size = 0
+			region_size = 0
 
 			for entry in file_table:
 				checksum, filesize, relpath = entry[0], entry[1], str(entry[2]).replace("\\", "/")
@@ -1158,7 +1167,9 @@ class Scanner(Thread):
 					print(f"[WARNING] Server at {self.server[0]}:{self.server[1]} sent a file outside its {target} folder, skipping: {relpath!r}")
 					continue
 				if parts[-1] in ["region.json", "config.bmp"]:
-					ft.append(entry)
+					if target == "regions" and parts[1:] in (["config.bmp"], ["_Database", "region.json"]) and filesize <= SC4MP_REGION_FILE_LIMIT and region_size + filesize <= SC4MP_MAP_DOWNLOAD_LIMIT:	# only the ones the stats and region maps read
+						ft.append(entry)
+						region_size += filesize
 				elif target == "regions" and len(parts) == 2 and parts[1].lower().endswith(".sc4") and is_md5(checksum):
 					regions.setdefault(parts[0], []).append(checksum)
 					if city_cached(checksum):
@@ -1402,6 +1413,7 @@ class Scanner(Thread):
 
 						# Receive the file
 						filesize_read = 0
+						checksummer = hashlib.md5()
 						with d.open("wb") as dest:
 							while filesize_read < filesize:
 								filesize_remaining = filesize - filesize_read
@@ -1410,7 +1422,14 @@ class Scanner(Thread):
 								if not bytes_read:
 									break
 								dest.write(bytes_read)
+								checksummer.update(bytes_read)
 								filesize_read += len(bytes_read)
+
+						# Skip files that don't match their checksum, like the current protocol does
+						if checksummer.hexdigest() != entry[0]:
+							print(f"[WARNING] Server at {self.server[0]}:{self.server[1]} sent a file that doesn't match its checksum, skipping: {entry[2]!r}")
+							d.unlink(missing_ok=True)
+							continue
 
 						# Keep savegames' region view images for the region maps
 						self._cache_city(d, entry[0], filesize)
