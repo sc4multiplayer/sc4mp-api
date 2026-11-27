@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from inspect import stack
 from os import unlink
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from socket import socket
 from threading import Thread, Lock, current_thread
 
@@ -1144,8 +1144,8 @@ class Scanner(Thread):
 			self.parent.region_tiles[server_id] = tiles
 
 
-		def _prune_file_table(self, target, file_table, server_id):
-			"""Keeps the files needed for the stats (`region.json` and `config.bmp`), and the savegames not in the city cache yet, for the region maps (up to `SC4MP_MAP_DOWNLOAD_LIMIT` bytes per scan). Records the savegames in each region."""
+		def _prune_file_table(self, target, file_table, server_id, destination):
+			"""Keeps the files needed for the stats (`region.json` and `config.bmp`), and the savegames not in the city cache yet, for the region maps (up to `SC4MP_MAP_DOWNLOAD_LIMIT` bytes per scan). Records the savegames in each region. Skips files that would be written outside `destination`."""
 
 			ft = []
 			regions = {}
@@ -1154,6 +1154,9 @@ class Scanner(Thread):
 			for entry in file_table:
 				checksum, filesize, relpath = entry[0], entry[1], str(entry[2]).replace("\\", "/")
 				parts = relpath.split("/")
+				if not self._inside(destination, entry[2]):
+					print(f"[WARNING] Server at {self.server[0]}:{self.server[1]} sent a file outside its {target} folder, skipping: {relpath!r}")
+					continue
 				if parts[-1] in ["region.json", "config.bmp"]:
 					ft.append(entry)
 				elif target == "regions" and len(parts) == 2 and parts[1].lower().endswith(".sc4") and is_md5(checksum):
@@ -1168,6 +1171,20 @@ class Scanner(Thread):
 				self.parent.region_maps[server_id] = regions
 
 			return ft
+
+
+		def _inside(self, destination, relpath):
+			"""Whether `relpath` from a server's file table is a relative path that stays inside `destination`."""
+
+			relpath = str(relpath)
+			parts = relpath.replace("\\", "/").split("/")
+			if not relpath or ".." in parts or Path(relpath).is_absolute() or PureWindowsPath(relpath).anchor:
+				return False
+			try:
+				(Path(destination) / relpath).resolve().relative_to(Path(destination).resolve())
+				return True
+			except ValueError:
+				return False
 
 
 		def _cache_city(self, path, checksum, filesize):
@@ -1234,7 +1251,7 @@ class Scanner(Thread):
 					size = sum([entry[1] for entry in file_table])
 
 					# Prune file table as necessary
-					file_table = self._prune_file_table(target, file_table, server_id)
+					file_table = self._prune_file_table(target, file_table, server_id, destination)
 
 					# Download files (on a new connection, since servers answer one request per connection)
 					s = self.client_socket()
@@ -1362,7 +1379,7 @@ class Scanner(Thread):
 					size = sum([entry[1] for entry in file_table])
 
 					# Prune file table as necessary
-					file_table = self._prune_file_table(request, file_table, server_id)
+					file_table = self._prune_file_table(request, file_table, server_id, destination)
 
 					# Send pruned file table
 					send_json(s, file_table)
